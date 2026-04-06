@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: infra-hunter
-  namespace: default
+  namespace: hunter-ops
   labels:
     app: job-scraper
     component: worker
