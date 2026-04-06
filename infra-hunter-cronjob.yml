@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: infra-hunter
+  namespace: default
+  labels:
+    app: job-scraper
+    component: worker
+spec:
+  # Runs every 2 hours
+  schedule: "0 */2 * * *"
+  concurrencyPolicy: Forbid 
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: infra-hunter
+            image: 192.168.1.70:5000/job-scraper:v12.0
+            imagePullPolicy: Always
+            envFrom:
+            - secretRef:
+                name: hunter-secrets
+          restartPolicy: OnFailure
