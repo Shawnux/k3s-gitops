@@ -18,7 +18,7 @@ spec:
         spec:
           containers:
           - name: infra-hunter
-            image: 192.168.1.70:5000/job-scraper:v12.0
+            image: 192.168.1.70:5000/job-scraper:v12.1
             imagePullPolicy: Always
             envFrom:
             - secretRef:
