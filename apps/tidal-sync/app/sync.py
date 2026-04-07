@@ -9,9 +9,8 @@ from collections import Counter
 PLAYLIST_PREFIX = "Master Discography"
 MAX_TRACKS_PER_VOL = 9500 
 CHUNK_SIZE = 50           
-SERIES_THRESHOLD = 15     # Flag as repetitive if pattern appears this many times
+SERIES_THRESHOLD = 15     
 
-# Keywords to prioritize "better" versions of the same album
 QUALITY_PRIORITY = {
     "super deluxe": 11,
     "deluxe": 10,
@@ -30,20 +29,33 @@ def load_session():
     session.load_oauth_session(data['token_type'], data['access_token'], data['refresh_token'])
     return session
 
-def get_active_playlist(session):
+def get_active_playlist_and_vols(session):
     playlists = session.user.playlists()
     vols = sorted([p for p in playlists if p.name.startswith(PLAYLIST_PREFIX)], key=lambda x: x.name)
+    
     if not vols:
         print("No volumes found. Creating Volume 1...")
-        return session.user.create_playlist(f"{PLAYLIST_PREFIX} - Vol 1", "Automated GitOps Sync")
+        new_vol = session.user.create_playlist(f"{PLAYLIST_PREFIX} - Vol 1", "Automated GitOps Sync")
+        return new_vol, [new_vol]
+    
     active_vol = vols[-1]
-    current_track_count = len(active_vol.tracks())
+    
+    # FIX: Use the API metadata for the true count to bypass the 1000-track pagination blindspot
+    current_track_count = getattr(active_vol, 'num_tracks', 0)
+    if current_track_count == 0:
+        # Fallback if num_tracks isn't exposed in this specific library version
+        current_track_count = len(active_vol.tracks())
+        
     print(f"Current active volume: {active_vol.name} ({current_track_count}/{MAX_TRACKS_PER_VOL} tracks)")
+    
     if current_track_count >= MAX_TRACKS_PER_VOL:
         new_vol_num = len(vols) + 1
         print(f"Volume full! Rolling over to Volume {new_vol_num}...")
-        return session.user.create_playlist(f"{PLAYLIST_PREFIX} - Vol {new_vol_num}", "Automated GitOps Sync")
-    return active_vol
+        new_vol = session.user.create_playlist(f"{PLAYLIST_PREFIX} - Vol {new_vol_num}", "Automated GitOps Sync")
+        vols.append(new_vol)
+        return new_vol, vols
+    
+    return active_vol, vols
 
 def get_base_pattern(title):
     if not title: return ""
@@ -62,7 +74,6 @@ def get_quality_score(title):
     return score
 
 def modify_playlist(session, playlist, track_ids, mode="add"):
-    """Handles adding or removing tracks with ETag protection and 400-Error Fallback."""
     verb = "Adding" if mode == "add" else "Removing"
     print(f"  -> {verb} {len(track_ids)} tracks...")
     
@@ -73,7 +84,6 @@ def modify_playlist(session, playlist, track_ids, mode="add"):
         
         while retries > 0 and not success:
             try:
-                # Refresh ETag lock
                 playlist = session.playlist(playlist.id)
                 if mode == "add":
                     playlist.add(chunk)
@@ -87,17 +97,14 @@ def modify_playlist(session, playlist, track_ids, mode="add"):
                     time.sleep(2)
                     retries -= 1
                 elif "400" in str(e) and mode == "add":
-                    # THE FALLBACK ENGINE:
-                    # One bad track spoiled the batch. Break it down to 1-by-1 to save the rest.
-                    print("    [!] 400 Bad Request on batch. Identifying and dropping unplayable tracks...")
+                    print("    [!] 400 Bad Request on batch. Dropping unplayable tracks...")
                     for single_id in chunk:
                         try:
                             playlist = session.playlist(playlist.id)
                             playlist.add([single_id])
                         except Exception:
-                            # Silently ignore the unplayable/region-locked track
                             pass
-                    success = True # We handled this chunk manually
+                    success = True 
                 else:
                     print(f"    [!] Error during {mode}: {e}")
                     break 
@@ -108,11 +115,24 @@ def sync_library():
     print("--- Starting Tidal Sync ---")
     session = load_session()
     if not session.check_login():
-        raise Exception("Session invalid. The refresh token may have expired or been revoked.")
+        raise Exception("Session invalid.")
         
-    target_playlist = get_active_playlist(session)
-    current_tracks = target_playlist.tracks()
-    existing_track_ids = {track.id for track in current_tracks}
+    target_playlist, all_vols = get_active_playlist_and_vols(session)
+    
+    existing_track_ids = set()
+    current_tracks = []
+    
+    print("Building multi-volume cache (bypassing pagination limits)...")
+    for vol in all_vols:
+        try:
+            # Force the API limit to 10k so we don't go blind after 1000 tracks
+            vol_tracks = vol.tracks(limit=10000)
+        except TypeError:
+            vol_tracks = vol.tracks()
+            
+        existing_track_ids.update({t.id for t in vol_tracks})
+        if vol.id == target_playlist.id:
+            current_tracks = vol_tracks
     
     favorite_artists = session.user.favorites.artists()
     print(f"Found {len(favorite_artists)} favorite artists. Processing...\n")
@@ -131,7 +151,6 @@ def sync_library():
         if not raw_discography:
             continue
 
-        # 1. Dynamic Spam Detection
         base_titles = [get_base_pattern(getattr(r, 'name', '')) for r in raw_discography]
         title_counts = Counter(base_titles)
         dynamic_blocklist = {base for base, count in title_counts.items() if count >= SERIES_THRESHOLD and len(base) > 2}
@@ -139,7 +158,6 @@ def sync_library():
         deduped_dict = {}
         track_ids_to_purge = []
 
-        # 2. Identify Old Spam
         if dynamic_blocklist:
             print(f"  [i] Series detected: {', '.join(dynamic_blocklist)}")
             for track in current_tracks:
@@ -150,7 +168,6 @@ def sync_library():
             title = getattr(release, 'name', '')
             base_pattern = get_base_pattern(title)
             
-            # Identify New Spam
             if base_pattern in dynamic_blocklist:
                 try:
                     for t in release.tracks():
@@ -159,7 +176,6 @@ def sync_library():
                 except: pass
                 continue
 
-            # Standard Deluxe Logic
             score = get_quality_score(title)
             try: t_count = len(release.tracks())
             except: t_count = 0
@@ -169,14 +185,12 @@ def sync_library():
             elif score == deduped_dict[base_pattern][0] and t_count > deduped_dict[base_pattern][1]:
                 deduped_dict[base_pattern] = (score, t_count, release)
 
-        # 3. Purge Spam
         track_ids_to_purge = list(set(track_ids_to_purge)) 
         if track_ids_to_purge:
             print(f"  [!] Cleaning up {len(track_ids_to_purge)} repetitive/spam tracks from playlist...")
             target_playlist = modify_playlist(session, target_playlist, track_ids_to_purge, mode="remove")
             existing_track_ids = existing_track_ids - set(track_ids_to_purge)
 
-        # 4. Add Unique High-Quality Tracks
         final_releases = [v[2] for v in deduped_dict.values()]
         track_ids_to_add = []
         for release in final_releases:
