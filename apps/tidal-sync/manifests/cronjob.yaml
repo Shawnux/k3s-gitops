@@ -4,7 +4,7 @@ metadata:
   name: tidal-sync
   namespace: default 
 spec:
-  schedule: "0 0 * * *" # Runs at 00:00 every day
+  schedule: "0 0 * * *" 
   jobTemplate:
     spec:
       template:
@@ -13,6 +13,11 @@ spec:
           - name: tidal-sync
             image: ghcr.io/shawnux/tidal-sync:latest
             imagePullPolicy: Always
+            # --- ADD THIS ENV BLOCK ---
+            env:
+            - name: SESSION_PATH
+              value: "/app/secrets/session.json"
+            # --------------------------
             volumeMounts:
             - name: auth-vol
               mountPath: "/app/secrets"
