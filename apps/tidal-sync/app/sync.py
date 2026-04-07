@@ -103,11 +103,27 @@ def sync_library():
             # Add tracks in chunks to respect API rate limits
             for i in range(0, len(track_ids_to_add), CHUNK_SIZE):
                 chunk = track_ids_to_add[i:i + CHUNK_SIZE]
-                target_playlist.add(chunk)
+                
+                # 412 Error Defense: Re-fetch the playlist object to get the latest ETag lock
+                retries = 3
+                while retries > 0:
+                    try:
+                        # Re-fetch the playlist right before adding to ensure we have the latest ETag
+                        target_playlist = session.playlist(target_playlist.id)
+                        target_playlist.add(chunk)
+                        break # Success! Break out of the retry loop
+                    except Exception as e:
+                        if "412" in str(e):
+                            print("    [!] ETag mismatch. Refreshing playlist and retrying...")
+                            time.sleep(2)
+                            retries -= 1
+                        else:
+                            print(f"    [!] Failed to add chunk: {e}")
+                            break # Non-412 error, stop retrying this chunk
                 
                 # Update our local cache so we don't double-add if an artist has identical tracks on different releases
                 existing_track_ids.update(chunk) 
-                time.sleep(1) # Tiny sleep to be polite to Tidal's servers
+                time.sleep(2) # Slightly longer sleep to be polite to Tidal's servers
         else:
             print("  -> Up to date.")
 
