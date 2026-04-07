@@ -67,11 +67,21 @@ def sync_library():
     for artist in favorite_artists:
         print(f"Fetching: {artist.name}")
         
-        # Pull all release types
-        try:
-            full_discography = artist.get_albums() + artist.get_ep_singles() + artist.get_singles()
-        except Exception as e:
-            print(f"  [!] Failed to fetch discography for {artist.name}: {e}")
+        full_discography = []
+        
+        # Dynamically check and call available discography methods
+        # to ensure compatibility across different versions of the tidalapi
+        for method in ['get_albums', 'albums', 'get_singles', 'singles', 'get_ep_singles', 'eps']:
+            if hasattr(artist, method):
+                try:
+                    releases = getattr(artist, method)()
+                    if releases:
+                        full_discography.extend(releases)
+                except Exception as e:
+                    pass
+        
+        if not full_discography:
+            print(f"  [!] No releases found or failed to fetch for {artist.name}")
             continue
             
         track_ids_to_add = []
