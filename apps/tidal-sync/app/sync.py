@@ -62,31 +62,46 @@ def get_quality_score(title):
     return score
 
 def modify_playlist(session, playlist, track_ids, mode="add"):
-    """Handles adding or removing tracks with ETag/412 protection."""
+    """Handles adding or removing tracks with ETag protection and 400-Error Fallback."""
     verb = "Adding" if mode == "add" else "Removing"
     print(f"  -> {verb} {len(track_ids)} tracks...")
     
     for i in range(0, len(track_ids), CHUNK_SIZE):
         chunk = track_ids[i:i + CHUNK_SIZE]
         retries = 3
-        while retries > 0:
+        success = False
+        
+        while retries > 0 and not success:
             try:
-                # Refresh playlist object to get latest ETag
+                # Refresh ETag lock
                 playlist = session.playlist(playlist.id)
                 if mode == "add":
                     playlist.add(chunk)
                 else:
-                    # In tidalapi, remove usually requires index or ID list
-                    playlist.remove_by_id(chunk)
-                break 
+                    for tid in chunk:
+                        try: playlist.remove_by_id(tid)
+                        except: pass
+                success = True 
             except Exception as e:
                 if "412" in str(e):
                     time.sleep(2)
                     retries -= 1
+                elif "400" in str(e) and mode == "add":
+                    # THE FALLBACK ENGINE:
+                    # One bad track spoiled the batch. Break it down to 1-by-1 to save the rest.
+                    print("    [!] 400 Bad Request on batch. Identifying and dropping unplayable tracks...")
+                    for single_id in chunk:
+                        try:
+                            playlist = session.playlist(playlist.id)
+                            playlist.add([single_id])
+                        except Exception:
+                            # Silently ignore the unplayable/region-locked track
+                            pass
+                    success = True # We handled this chunk manually
                 else:
                     print(f"    [!] Error during {mode}: {e}")
                     break 
-        time.sleep(2)
+        time.sleep(1)
     return playlist
 
 def sync_library():
@@ -96,7 +111,6 @@ def sync_library():
         raise Exception("Session invalid. The refresh token may have expired or been revoked.")
         
     target_playlist = get_active_playlist(session)
-    # Cache existing tracks as objects to check titles for the purge
     current_tracks = target_playlist.tracks()
     existing_track_ids = {track.id for track in current_tracks}
     
@@ -117,21 +131,18 @@ def sync_library():
         if not raw_discography:
             continue
 
-        # 1. Dynamic Spam Detection (Frequency Analysis)
+        # 1. Dynamic Spam Detection
         base_titles = [get_base_pattern(getattr(r, 'name', '')) for r in raw_discography]
         title_counts = Counter(base_titles)
         dynamic_blocklist = {base for base, count in title_counts.items() if count >= SERIES_THRESHOLD and len(base) > 2}
         
-        # 2. Deluxe Deduplication & Purge Logic
         deduped_dict = {}
         track_ids_to_purge = []
 
-        # Identify tracks ALREADY in the playlist that match the new dynamic blocklist
+        # 2. Identify Old Spam
         if dynamic_blocklist:
             print(f"  [i] Series detected: {', '.join(dynamic_blocklist)}")
             for track in current_tracks:
-                # If the track title or album title matches a blocked series, marked for purge
-                # Note: This is an expensive check, but essential for cleaning 'polluted' playlists
                 if get_base_pattern(track.name) in dynamic_blocklist:
                     track_ids_to_purge.append(track.id)
 
@@ -139,7 +150,7 @@ def sync_library():
             title = getattr(release, 'name', '')
             base_pattern = get_base_pattern(title)
             
-            # If release is in blocklist, collect its IDs for purging if they exist in the playlist
+            # Identify New Spam
             if base_pattern in dynamic_blocklist:
                 try:
                     for t in release.tracks():
@@ -158,15 +169,14 @@ def sync_library():
             elif score == deduped_dict[base_pattern][0] and t_count > deduped_dict[base_pattern][1]:
                 deduped_dict[base_pattern] = (score, t_count, release)
 
-        # 3. Execute Purge (Remove Repetitive Content)
-        track_ids_to_purge = list(set(track_ids_to_purge)) # Unique IDs only
+        # 3. Purge Spam
+        track_ids_to_purge = list(set(track_ids_to_purge)) 
         if track_ids_to_purge:
             print(f"  [!] Cleaning up {len(track_ids_to_purge)} repetitive/spam tracks from playlist...")
             target_playlist = modify_playlist(session, target_playlist, track_ids_to_purge, mode="remove")
-            # Update cache so we don't think they are still there
             existing_track_ids = existing_track_ids - set(track_ids_to_purge)
 
-        # 4. Extract and Add New Unique Tracks
+        # 4. Add Unique High-Quality Tracks
         final_releases = [v[2] for v in deduped_dict.values()]
         track_ids_to_add = []
         for release in final_releases:
