@@ -1,0 +1,52 @@
+name: Build and Push Tidal Sync
+
+on:
+  push:
+    branches:
+      - main
+    # ONLY trigger if we edit the python code or Dockerfile
+    paths:
+      - 'apps/tidal-sync/app/**' 
+
+env:
+  REGISTRY: ghcr.io
+  # This uses your GitHub username and the folder name for the image
+  IMAGE_NAME: ${{ github.repository_owner }}/tidal-sync
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # Required to push to GHCR
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GitHub provides this token automatically
+          password: ${{ secrets.GITHUB_TOKEN }} 
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tags it as 'latest' and also tags it with the specific Git commit SHA
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          # Tells Docker where to find the Dockerfile
+          context: ./apps/tidal-sync/app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
