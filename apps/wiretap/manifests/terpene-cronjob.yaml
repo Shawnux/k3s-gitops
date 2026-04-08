@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: terpene-hunter
+  namespace: wiretap
+spec:
+  schedule: "0 9,21 * * *" # Runs at 9:00 AM and 9:00 PM
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: k3s-worker-01
+          containers:
+          - name: terpene-hunter
+            image: docker.io/library/wiretap:v14.0-uc
+            imagePullPolicy: Never
+            command: ["python", "/app/terpene_hunter.py"]
+            envFrom:
+            - secretRef:
+                name: wiretap-secrets
+            volumeMounts:
+            - name: memory-bank
+              mountPath: /data
+            - name: dshm # THE CHROME CRASH FIX
+              mountPath: /dev/shm
+          volumes:
+          - name: memory-bank
+            hostPath:
+              path: /home/sasha/wiretap-data
+              type: DirectoryOrCreate
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 1Gi
+          restartPolicy: OnFailure

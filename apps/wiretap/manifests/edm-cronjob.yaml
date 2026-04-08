@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: edm-hunter
+  namespace: wiretap
+spec:
+  schedule: "0 */4 * * *" # Runs every 4 hours
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            kubernetes.io/hostname: k3s-worker-01
+          containers:
+          - name: edm-hunter
+            image: docker.io/library/wiretap:v14.0-uc
+            imagePullPolicy: Never
+            command: ["python", "/app/edm_hunter.py"]
+            envFrom:
+            - secretRef:
+                name: wiretap-secrets
+            volumeMounts:
+            - name: memory-bank
+              mountPath: /data
+            - name: dshm # THE CHROME CRASH FIX
+              mountPath: /dev/shm
+          volumes:
+          - name: memory-bank
+            hostPath:
+              path: /home/sasha/wiretap-data
+              type: DirectoryOrCreate
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 1Gi
+          restartPolicy: OnFailure
