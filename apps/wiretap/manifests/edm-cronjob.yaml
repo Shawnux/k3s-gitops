@@ -14,7 +14,7 @@ spec:
             kubernetes.io/hostname: k3s-worker-01
           containers:
           - name: edm-hunter
-            image: docker.io/library/wiretap:v14.0-uc
+            image: docker.io/library/wiretap:v14.1-uc
             imagePullPolicy: Never
             command: ["python", "/app/edm_hunter.py"]
             envFrom:
