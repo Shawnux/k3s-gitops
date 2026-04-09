@@ -15,11 +15,10 @@ QUALITY_PRIORITY = {
     "special": 7, "bonus": 6, "remaster": 5
 }
 
-# --- MusicBrainz Local Setup ---
-# Point to your internal K3s service. NO RATE LIMITS!
-musicbrainzngs.set_useragent("TidalGitOpsSync", "1.0", "homelab-internal")
-musicbrainzngs.set_hostname("musicbrainz.default.svc.cluster.local:5000")
-musicbrainzngs.set_rate_limit(False) 
+# --- MusicBrainz Public API Setup ---
+# We must use a descriptive User-Agent or the public API will ban us
+musicbrainzngs.set_useragent("TidalGitOpsSync", "1.1", "homelab-automation")
+# The library automatically limits to 1 req/sec, but we will add manual sleeps to be perfectly safe
 
 def load_session():
     session = tidalapi.Session()
@@ -45,17 +44,18 @@ def get_quality_score(title):
     return score
 
 def get_official_albums(artist_name):
-    """Queries local MusicBrainz for canonical studio albums, rejecting live/radio sets."""
-    print(f"  [MB] Querying authority for {artist_name}...")
+    """Queries public MusicBrainz for canonical studio albums. Respects rate limits."""
+    print(f"  [MB] Querying public authority for {artist_name}...")
     try:
-        # 1. Grab the Artist's unique MBID
+        # Sleep to guarantee we never hit the 1 req/sec limit
+        time.sleep(1.5) 
         search = musicbrainzngs.search_artists(artist=artist_name, limit=1)
         if not search['artist-list']: 
             print("  [MB] Artist not found in database.")
             return set()
         mbid = search['artist-list'][0]['id']
 
-        # 2. Fetch Release Groups (Albums & EPs only)
+        time.sleep(1.5)
         releases = musicbrainzngs.browse_release_groups(
             artist=mbid, 
             release_type=['album', 'ep'], 
@@ -64,7 +64,6 @@ def get_official_albums(artist_name):
         
         canonical_titles = set()
         for rg in releases.get('release-group-list', []):
-            # 3. The Ultimate Filter: Drop live shows, radio broadcasts, and comps
             secondary = rg.get('secondary-type-list', [])
             if any(bad in secondary for bad in ['Live', 'Compilation', 'Mixtape/Street', 'Broadcast', 'Remix']):
                 continue
@@ -101,7 +100,7 @@ def add_chunk_with_fallback(session, playlist, chunk):
     return added_count
 
 def sync_library():
-    print("--- Starting Source-of-Truth Sync ---")
+    print("--- Starting Polite Source-of-Truth Sync ---")
     session = load_session()
     if not session.check_login(): raise Exception("Session invalid.")
         
@@ -127,7 +126,6 @@ def sync_library():
     for artist in favorite_artists:
         print(f"\nFetching: {artist.name}")
         
-        # 1. Fetch the authoritative list from your local database
         canonical_titles = get_official_albums(artist.name)
         if not canonical_titles:
             print("  -> No canonical releases found. Skipping.")
@@ -143,12 +141,10 @@ def sync_library():
         
         deduped_dict = {}
 
-        # 2. Filter Tidal releases against the MusicBrainz authority
         for release in raw_discography:
             title = getattr(release, 'name', '')
             base_pattern = get_base_pattern(title)
             
-            # If Tidal's album isn't in the official MB database, it's garbage. Drop it.
             if base_pattern not in canonical_titles:
                 continue
 
