@@ -1,1 +1,2 @@
-tidalapi
+tidalapi==0.8.11
+musicbrainzngs==0.7.1

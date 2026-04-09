@@ -1,30 +1,25 @@
 import tidalapi
+import musicbrainzngs
 import json
 import os
 import time
 import re
-from collections import Counter
 
 # --- Configuration ---
 PLAYLIST_PREFIX = "Master Discography"
 MAX_TRACKS_PER_VOL = 9500 
 CHUNK_SIZE = 50           
-SERIES_THRESHOLD = 15     
-
-# The "Merciless" Blocklist - Expanded for Festivals and Live Sets
-STATIC_BLOCKLIST = [
-    # Podcasts & Radio Shows
-    "group therapy", "a state of trance", "asot", "abgt", "corstens countdown", 
-    "wake your mind", "electric for life", "purified", "club life", "satisfaction",
-    # Festivals & Live Sets
-    "live at", "live from", "live set", "tomorrowland", "ultra music", 
-    "electric daisy carnival", "edc", "awakenings", "creamfields", "defqon"
-]
 
 QUALITY_PRIORITY = {
     "super deluxe": 11, "deluxe": 10, "complete": 9, "expanded": 8,
     "special": 7, "bonus": 6, "remaster": 5
 }
+
+# --- MusicBrainz Local Setup ---
+# Point to your internal K3s service. NO RATE LIMITS!
+musicbrainzngs.set_useragent("TidalGitOpsSync", "1.0", "homelab-internal")
+musicbrainzngs.set_hostname("musicbrainz.default.svc.cluster.local:5000")
+musicbrainzngs.set_rate_limit(False) 
 
 def load_session():
     session = tidalapi.Session()
@@ -42,15 +37,6 @@ def get_base_pattern(title):
     t = re.sub(r'[^\w\s]', '', t)
     return ' '.join(t.split())
 
-def is_spam(title, blocklist):
-    """Fuzzy matching: Returns True if any blocklist phrase is INSIDE the title."""
-    pattern = get_base_pattern(title)
-    for b in blocklist:
-        # Changed to >= 3 so 3-letter acronyms like 'edc' are successfully caught
-        if len(b) >= 3 and b in pattern:
-            return True
-    return False
-
 def get_quality_score(title):
     score = 0
     t = str(title).lower()
@@ -58,8 +44,39 @@ def get_quality_score(title):
         if keyword in t: score = max(score, value)
     return score
 
+def get_official_albums(artist_name):
+    """Queries local MusicBrainz for canonical studio albums, rejecting live/radio sets."""
+    print(f"  [MB] Querying authority for {artist_name}...")
+    try:
+        # 1. Grab the Artist's unique MBID
+        search = musicbrainzngs.search_artists(artist=artist_name, limit=1)
+        if not search['artist-list']: 
+            print("  [MB] Artist not found in database.")
+            return set()
+        mbid = search['artist-list'][0]['id']
+
+        # 2. Fetch Release Groups (Albums & EPs only)
+        releases = musicbrainzngs.browse_release_groups(
+            artist=mbid, 
+            release_type=['album', 'ep'], 
+            limit=100
+        )
+        
+        canonical_titles = set()
+        for rg in releases.get('release-group-list', []):
+            # 3. The Ultimate Filter: Drop live shows, radio broadcasts, and comps
+            secondary = rg.get('secondary-type-list', [])
+            if any(bad in secondary for bad in ['Live', 'Compilation', 'Mixtape/Street', 'Broadcast', 'Remix']):
+                continue
+            
+            canonical_titles.add(get_base_pattern(rg['title']))
+            
+        return canonical_titles
+    except Exception as e:
+        print(f"  [!] MusicBrainz lookup failed: {e}")
+        return set()
+
 def add_chunk_with_fallback(session, playlist, chunk):
-    """Adds tracks and returns the number of successfully added tracks."""
     retries = 3
     added_count = 0
     while retries > 0:
@@ -72,7 +89,6 @@ def add_chunk_with_fallback(session, playlist, chunk):
                 time.sleep(2)
                 retries -= 1
             elif "400" in str(e):
-                print("    [!] 400 Bad Request. Isolating bad tracks...")
                 for tid in chunk:
                     try:
                         playlist = session.playlist(playlist.id)
@@ -81,42 +97,42 @@ def add_chunk_with_fallback(session, playlist, chunk):
                     except: pass
                 return added_count
             else:
-                print(f"    [!] Error: {e}")
                 break
     return added_count
 
 def sync_library():
-    print("--- Starting Tidal Sync ---")
+    print("--- Starting Source-of-Truth Sync ---")
     session = load_session()
     if not session.check_login(): raise Exception("Session invalid.")
         
-    # --- Bootup & Volume Discovery ---
     playlists = session.user.playlists()
     all_vols = sorted([p for p in playlists if p.name.startswith(PLAYLIST_PREFIX)], key=lambda x: x.name)
     
     if not all_vols:
-        print("No volumes found. Creating Volume 1...")
         target_playlist = session.user.create_playlist(f"{PLAYLIST_PREFIX} - Vol 1", "Automated GitOps Sync")
         all_vols.append(target_playlist)
     else:
         target_playlist = all_vols[-1]
 
     existing_track_ids = set()
-    print("Building multi-volume cache...")
     for vol in all_vols:
         try: vol_tracks = vol.tracks(limit=10000)
         except: vol_tracks = vol.tracks()
         existing_track_ids.update({t.id for t in vol_tracks})
         if vol.id == target_playlist.id:
             current_vol_track_count = len(vol_tracks)
-
-    print(f"Active Target: {target_playlist.name} (Starting at {current_vol_track_count} tracks)\n")
     
     favorite_artists = session.user.favorites.artists()
 
     for artist in favorite_artists:
-        print(f"Fetching: {artist.name}")
+        print(f"\nFetching: {artist.name}")
         
+        # 1. Fetch the authoritative list from your local database
+        canonical_titles = get_official_albums(artist.name)
+        if not canonical_titles:
+            print("  -> No canonical releases found. Skipping.")
+            continue
+
         raw_discography = []
         for method in ['get_albums', 'albums', 'get_singles', 'singles', 'get_ep_singles', 'eps']:
             if hasattr(artist, method):
@@ -125,23 +141,15 @@ def sync_library():
                     if releases: raw_discography.extend(releases)
                 except: pass
         
-        if not raw_discography: continue
-
-        # 1. Build Master Blocklist
-        base_titles = [get_base_pattern(getattr(r, 'name', '')) for r in raw_discography]
-        title_counts = Counter(base_titles)
-        dynamic_blocklist = {base for base, count in title_counts.items() if count >= SERIES_THRESHOLD and len(base) > 2}
-        master_blocklist = set(STATIC_BLOCKLIST).union(dynamic_blocklist)
-        
         deduped_dict = {}
 
-        # 2. Filter & Deduplicate
+        # 2. Filter Tidal releases against the MusicBrainz authority
         for release in raw_discography:
             title = getattr(release, 'name', '')
             base_pattern = get_base_pattern(title)
             
-            # Fuzzy match against the master blocklist
-            if is_spam(title, master_blocklist):
+            # If Tidal's album isn't in the official MB database, it's garbage. Drop it.
+            if base_pattern not in canonical_titles:
                 continue
 
             score = get_quality_score(title)
@@ -153,25 +161,20 @@ def sync_library():
             elif score == deduped_dict[base_pattern][0] and t_count > deduped_dict[base_pattern][1]:
                 deduped_dict[base_pattern] = (score, t_count, release)
 
-        # 3. Extract Unique Tracks
         final_releases = [v[2] for v in deduped_dict.values()]
         track_ids_to_add = []
         for release in final_releases:
             try:
                 for track in release.tracks():
-                    # Double check track title against blocklist just in case
-                    if not is_spam(track.name, master_blocklist) and track.id not in existing_track_ids:
+                    if track.id not in existing_track_ids:
                         track_ids_to_add.append(track.id)
             except: continue
                 
-        # 4. Dynamic Addition & Rollover
         if track_ids_to_add:
-            print(f"  -> Queued {len(track_ids_to_add)} pristine tracks...")
-            
+            print(f"  -> Queued {len(track_ids_to_add)} verified studio tracks...")
             for i in range(0, len(track_ids_to_add), CHUNK_SIZE):
                 chunk = track_ids_to_add[i:i + CHUNK_SIZE]
                 
-                # Check Rollover BEFORE adding
                 if current_vol_track_count + len(chunk) > MAX_TRACKS_PER_VOL:
                     new_vol_num = len(all_vols) + 1
                     print(f"  [!] Capacity Reached. Rolling over to Volume {new_vol_num}...")
@@ -179,15 +182,12 @@ def sync_library():
                     all_vols.append(target_playlist)
                     current_vol_track_count = 0
                 
-                # Add and track state
                 added = add_chunk_with_fallback(session, target_playlist, chunk)
                 current_vol_track_count += added
                 existing_track_ids.update(chunk)
                 time.sleep(1)
         else:
             print("  -> Up to date.")
-
-    print("\n--- Sync Complete ---")
 
 if __name__ == "__main__":
     sync_library()
