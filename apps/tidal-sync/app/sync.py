@@ -4,11 +4,20 @@ import json
 import os
 import time
 import re
+from collections import Counter
 
 # --- Configuration ---
 PLAYLIST_PREFIX = "Master Discography"
 MAX_TRACKS_PER_VOL = 9500 
 CHUNK_SIZE = 50           
+SERIES_THRESHOLD = 15     
+
+STATIC_BLOCKLIST = [
+    "group therapy", "a state of trance", "asot", "abgt", "corstens countdown", 
+    "wake your mind", "electric for life", "purified", "club life", "satisfaction",
+    "live at", "live from", "live set", "tomorrowland", "ultra music", 
+    "electric daisy carnival", "edc", "awakenings", "creamfields", "defqon"
+]
 
 QUALITY_PRIORITY = {
     "super deluxe": 11, "deluxe": 10, "complete": 9, "expanded": 8,
@@ -16,7 +25,7 @@ QUALITY_PRIORITY = {
 }
 
 # --- MusicBrainz Public API Setup ---
-musicbrainzngs.set_useragent("TidalGitOpsSync", "1.2", "homelab-automation")
+musicbrainzngs.set_useragent("TidalGitOpsSync", "1.3", "homelab-automation")
 
 def load_session():
     session = tidalapi.Session()
@@ -34,6 +43,13 @@ def get_base_pattern(title):
     t = re.sub(r'[^\w\s]', '', t)
     return ' '.join(t.split())
 
+def is_spam(title, blocklist):
+    pattern = get_base_pattern(title)
+    for b in blocklist:
+        if len(b) >= 3 and b in pattern:
+            return True
+    return False
+
 def get_quality_score(title):
     score = 0
     t = str(title).lower()
@@ -42,20 +58,17 @@ def get_quality_score(title):
     return score
 
 def get_official_albums(tidal_artist):
-    """Smart Entity Resolution: Cross-references Tidal albums with MusicBrainz to find the correct MBID."""
+    """Smart Entity Resolution: Cross-references Tidal albums with MusicBrainz."""
     print(f"  [MB] Resolving entity for {tidal_artist.name}...")
     mbid = None
     
-    # ATTEMPT 1: Cross-Reference via Tidal Album
     try:
         albums = tidal_artist.get_albums()
         if albums:
             ref_album = albums[0].name
-            # Strip punctuation to prevent Lucene query syntax crashes
             clean_ref = re.sub(r'[^\w\s]', '', ref_album).strip()
             
             time.sleep(1.5)
-            # Query MB for an exact release group match
             rg_search = musicbrainzngs.search_release_groups(
                 query=f'artist:"{tidal_artist.name}" AND releasegroup:"{clean_ref}"', 
                 limit=1
@@ -63,10 +76,9 @@ def get_official_albums(tidal_artist):
             if rg_search.get('release-group-list'):
                 mbid = rg_search['release-group-list'][0]['artist-credit'][0]['artist']['id']
                 print("    -> Entity resolved via Album cross-reference.")
-    except Exception as e:
+    except Exception:
         pass
 
-    # ATTEMPT 2: Fallback to highest-scoring artist match
     if not mbid:
         try:
             time.sleep(1.5)
@@ -74,20 +86,18 @@ def get_official_albums(tidal_artist):
             if search.get('artist-list'):
                 mbid = search['artist-list'][0]['id']
                 print("    -> Entity resolved via Top Relevance search.")
-        except Exception as e:
-            print(f"  [!] MusicBrainz artist search failed: {e}")
+        except Exception:
             return set()
 
     if not mbid:
-        print("  [MB] Artist not found in database.")
         return set()
 
-    # ATTEMPT 3: Fetch canonical albums using the verified MBID
     try:
         time.sleep(1.5)
+        # UPGRADE: Now includes 'single' to catch EDM producers who don't drop albums
         releases = musicbrainzngs.browse_release_groups(
             artist=mbid, 
-            release_type=['album', 'ep'], 
+            release_type=['album', 'ep', 'single'], 
             limit=100
         )
         
@@ -96,12 +106,10 @@ def get_official_albums(tidal_artist):
             secondary = rg.get('secondary-type-list', [])
             if any(bad in secondary for bad in ['Live', 'Compilation', 'Mixtape/Street', 'Broadcast', 'Remix']):
                 continue
-            
             canonical_titles.add(get_base_pattern(rg['title']))
             
         return canonical_titles
-    except Exception as e:
-        print(f"  [!] MusicBrainz release lookup failed: {e}")
+    except Exception:
         return set()
 
 def add_chunk_with_fallback(session, playlist, chunk):
@@ -129,7 +137,7 @@ def add_chunk_with_fallback(session, playlist, chunk):
     return added_count
 
 def sync_library():
-    print("--- Starting Smart Source-of-Truth Sync ---")
+    print("--- Starting Hybrid Source-of-Truth Sync ---")
     session = load_session()
     if not session.check_login(): raise Exception("Session invalid.")
         
@@ -150,13 +158,10 @@ def sync_library():
         if vol.id == target_playlist.id:
             current_vol_track_count = len(vol_tracks)
     
-    # FIX: Bypass the 50-artist pagination limit for Favorites
     print("Fetching full artist list from Tidal...")
-    favorite_artists = []
     try:
         favorite_artists = session.user.favorites.artists(limit=1000)
     except TypeError:
-        # Fallback if this version of the library ignores the limit parameter
         favorite_artists = list(session.user.favorites.artists())
         
     print(f"Found {len(favorite_artists)} favorite artists. Processing...\n")
@@ -164,10 +169,13 @@ def sync_library():
     for artist in favorite_artists:
         print(f"\nFetching: {artist.name}")
         
+        # --- The Hybrid Logic Gateway ---
+        use_mb_filter = True
         canonical_titles = get_official_albums(artist)
+        
         if not canonical_titles:
-            print("  -> No canonical releases found. Skipping.")
-            continue
+            print("  [!] Authority check failed/empty. Degading to Fuzzy Filter fallback...")
+            use_mb_filter = False
 
         raw_discography = []
         for method in ['get_albums', 'albums', 'get_singles', 'singles', 'get_ep_singles', 'eps']:
@@ -177,14 +185,29 @@ def sync_library():
                     if releases: raw_discography.extend(releases)
                 except: pass
         
+        if not raw_discography: continue
+
+        # If MB failed, dynamically generate the frequency blocklist for this specific artist
+        master_blocklist = set(STATIC_BLOCKLIST)
+        if not use_mb_filter:
+            base_titles = [get_base_pattern(getattr(r, 'name', '')) for r in raw_discography]
+            title_counts = Counter(base_titles)
+            dynamic_blocklist = {base for base, count in title_counts.items() if count >= SERIES_THRESHOLD and len(base) > 2}
+            master_blocklist = master_blocklist.union(dynamic_blocklist)
+        
         deduped_dict = {}
 
         for release in raw_discography:
             title = getattr(release, 'name', '')
             base_pattern = get_base_pattern(title)
             
-            if base_pattern not in canonical_titles:
-                continue
+            # Apply the appropriate filter engine
+            if use_mb_filter:
+                if base_pattern not in canonical_titles:
+                    continue
+            else:
+                if is_spam(title, master_blocklist):
+                    continue
 
             score = get_quality_score(title)
             try: t_count = len(release.tracks())
@@ -200,12 +223,15 @@ def sync_library():
         for release in final_releases:
             try:
                 for track in release.tracks():
-                    if track.id not in existing_track_ids:
+                    # Double check tracks against the blocklist just in case
+                    if not is_spam(track.name, set(STATIC_BLOCKLIST)) and track.id not in existing_track_ids:
                         track_ids_to_add.append(track.id)
             except: continue
                 
         if track_ids_to_add:
-            print(f"  -> Queued {len(track_ids_to_add)} verified studio tracks...")
+            status = "verified studio tracks" if use_mb_filter else "fuzzy-filtered tracks"
+            print(f"  -> Queued {len(track_ids_to_add)} {status}...")
+            
             for i in range(0, len(track_ids_to_add), CHUNK_SIZE):
                 chunk = track_ids_to_add[i:i + CHUNK_SIZE]
                 
