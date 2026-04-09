@@ -16,9 +16,7 @@ QUALITY_PRIORITY = {
 }
 
 # --- MusicBrainz Public API Setup ---
-# We must use a descriptive User-Agent or the public API will ban us
-musicbrainzngs.set_useragent("TidalGitOpsSync", "1.1", "homelab-automation")
-# The library automatically limits to 1 req/sec, but we will add manual sleeps to be perfectly safe
+musicbrainzngs.set_useragent("TidalGitOpsSync", "1.2", "homelab-automation")
 
 def load_session():
     session = tidalapi.Session()
@@ -43,18 +41,49 @@ def get_quality_score(title):
         if keyword in t: score = max(score, value)
     return score
 
-def get_official_albums(artist_name):
-    """Queries public MusicBrainz for canonical studio albums. Respects rate limits."""
-    print(f"  [MB] Querying public authority for {artist_name}...")
+def get_official_albums(tidal_artist):
+    """Smart Entity Resolution: Cross-references Tidal albums with MusicBrainz to find the correct MBID."""
+    print(f"  [MB] Resolving entity for {tidal_artist.name}...")
+    mbid = None
+    
+    # ATTEMPT 1: Cross-Reference via Tidal Album
     try:
-        # Sleep to guarantee we never hit the 1 req/sec limit
-        time.sleep(1.5) 
-        search = musicbrainzngs.search_artists(artist=artist_name, limit=1)
-        if not search['artist-list']: 
-            print("  [MB] Artist not found in database.")
-            return set()
-        mbid = search['artist-list'][0]['id']
+        albums = tidal_artist.get_albums()
+        if albums:
+            ref_album = albums[0].name
+            # Strip punctuation to prevent Lucene query syntax crashes
+            clean_ref = re.sub(r'[^\w\s]', '', ref_album).strip()
+            
+            time.sleep(1.5)
+            # Query MB for an exact release group match
+            rg_search = musicbrainzngs.search_release_groups(
+                query=f'artist:"{tidal_artist.name}" AND releasegroup:"{clean_ref}"', 
+                limit=1
+            )
+            if rg_search.get('release-group-list'):
+                mbid = rg_search['release-group-list'][0]['artist-credit'][0]['artist']['id']
+                print("    -> Entity resolved via Album cross-reference.")
+    except Exception as e:
+        pass
 
+    # ATTEMPT 2: Fallback to highest-scoring artist match
+    if not mbid:
+        try:
+            time.sleep(1.5)
+            search = musicbrainzngs.search_artists(artist=tidal_artist.name, limit=3)
+            if search.get('artist-list'):
+                mbid = search['artist-list'][0]['id']
+                print("    -> Entity resolved via Top Relevance search.")
+        except Exception as e:
+            print(f"  [!] MusicBrainz artist search failed: {e}")
+            return set()
+
+    if not mbid:
+        print("  [MB] Artist not found in database.")
+        return set()
+
+    # ATTEMPT 3: Fetch canonical albums using the verified MBID
+    try:
         time.sleep(1.5)
         releases = musicbrainzngs.browse_release_groups(
             artist=mbid, 
@@ -72,7 +101,7 @@ def get_official_albums(artist_name):
             
         return canonical_titles
     except Exception as e:
-        print(f"  [!] MusicBrainz lookup failed: {e}")
+        print(f"  [!] MusicBrainz release lookup failed: {e}")
         return set()
 
 def add_chunk_with_fallback(session, playlist, chunk):
@@ -100,7 +129,7 @@ def add_chunk_with_fallback(session, playlist, chunk):
     return added_count
 
 def sync_library():
-    print("--- Starting Polite Source-of-Truth Sync ---")
+    print("--- Starting Smart Source-of-Truth Sync ---")
     session = load_session()
     if not session.check_login(): raise Exception("Session invalid.")
         
@@ -121,12 +150,21 @@ def sync_library():
         if vol.id == target_playlist.id:
             current_vol_track_count = len(vol_tracks)
     
-    favorite_artists = session.user.favorites.artists()
+    # FIX: Bypass the 50-artist pagination limit for Favorites
+    print("Fetching full artist list from Tidal...")
+    favorite_artists = []
+    try:
+        favorite_artists = session.user.favorites.artists(limit=1000)
+    except TypeError:
+        # Fallback if this version of the library ignores the limit parameter
+        favorite_artists = list(session.user.favorites.artists())
+        
+    print(f"Found {len(favorite_artists)} favorite artists. Processing...\n")
 
     for artist in favorite_artists:
         print(f"\nFetching: {artist.name}")
         
-        canonical_titles = get_official_albums(artist.name)
+        canonical_titles = get_official_albums(artist)
         if not canonical_titles:
             print("  -> No canonical releases found. Skipping.")
             continue
