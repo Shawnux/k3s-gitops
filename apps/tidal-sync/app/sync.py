@@ -11,10 +11,14 @@ MAX_TRACKS_PER_VOL = 9500
 CHUNK_SIZE = 50           
 SERIES_THRESHOLD = 15     
 
-# The "Merciless" Blocklist - Fuzzy matches against these phrases.
+# The "Merciless" Blocklist - Expanded for Festivals and Live Sets
 STATIC_BLOCKLIST = [
+    # Podcasts & Radio Shows
     "group therapy", "a state of trance", "asot", "abgt", "corstens countdown", 
-    "wake your mind", "electric for life", "purified", "club life", "satisfaction"
+    "wake your mind", "electric for life", "purified", "club life", "satisfaction",
+    # Festivals & Live Sets
+    "live at", "live from", "live set", "tomorrowland", "ultra music", 
+    "electric daisy carnival", "edc", "awakenings", "creamfields", "defqon"
 ]
 
 QUALITY_PRIORITY = {
@@ -42,8 +46,8 @@ def is_spam(title, blocklist):
     """Fuzzy matching: Returns True if any blocklist phrase is INSIDE the title."""
     pattern = get_base_pattern(title)
     for b in blocklist:
-        # If the blocked phrase is at least 4 letters and exists inside the title
-        if len(b) > 3 and b in pattern:
+        # Changed to >= 3 so 3-letter acronyms like 'edc' are successfully caught
+        if len(b) >= 3 and b in pattern:
             return True
     return False
 
