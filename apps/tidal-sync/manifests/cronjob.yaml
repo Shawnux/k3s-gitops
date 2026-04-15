@@ -13,7 +13,6 @@ spec:
           - name: tidal-sync
             image: ghcr.io/shawnux/tidal-sync:latest
             imagePullPolicy: Always
-            # --- ADD THIS ENV BLOCK ---
             env:
             - name: SESSION_PATH
               value: "/app/secrets/session.json"
