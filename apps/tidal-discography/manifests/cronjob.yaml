@@ -1,0 +1,73 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tidal-discography
+  namespace: tidal-discography
+spec:
+  schedule: "17 4 * * *"
+  timeZone: America/New_York
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 21600
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels:
+            app: tidal-discography
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/control-plane
+                        operator: DoesNotExist
+                      - key: kubernetes.io/hostname
+                        operator: NotIn
+                        values: [k3s-worker-02]
+          containers:
+            - name: sync
+              image: ghcr.io/shawnux/tidal-discography:latest
+              imagePullPolicy: Always
+              args: ["sync"]
+              env:
+                - name: TIDAL_DISCO_CONFIG
+                  value: /config/config.toml
+              envFrom:
+                - secretRef:
+                    name: tidal-discography
+              volumeMounts:
+                - name: state
+                  mountPath: /data
+                - name: config
+                  mountPath: /config
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 96Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+          volumes:
+            - name: state
+              persistentVolumeClaim:
+                claimName: tidal-discography-state
+            - name: config
+              configMap:
+                name: tidal-discography-config

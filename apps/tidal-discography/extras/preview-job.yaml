@@ -1,0 +1,60 @@
+# A one-off run that changes nothing. Not part of the ArgoCD app:
+#   kubectl create -f preview-job.yaml
+#   kubectl -n tidal-discography logs -f -l app=tidal-discography-preview
+# Other useful args:
+#   ["sync", "--only", "artist name"]   one artist's kept and left-out releases
+#   ["report"]                          what the last real run left out, and why
+#   ["sync", "--force"]                 a real run that skips the removal limit (after changing rules)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: tidal-discography-preview-
+  namespace: tidal-discography
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: tidal-discography-preview
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: [k3s-worker-02]
+      containers:
+        - name: preview
+          image: ghcr.io/shawnux/tidal-discography:latest
+          imagePullPolicy: Always
+          args: ["sync", "--dry-run"]
+          env:
+            - name: TIDAL_DISCO_CONFIG
+              value: /config/config.toml
+          envFrom:
+            - secretRef:
+                name: tidal-discography
+          volumeMounts:
+            - name: state
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: tidal-discography-state
+        - name: config
+          configMap:
+            name: tidal-discography-config

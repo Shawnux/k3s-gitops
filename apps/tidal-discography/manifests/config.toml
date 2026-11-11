@@ -1,0 +1,39 @@
+# tidal-discography settings. Secrets (client id, refresh token) come from the
+# tidal-discography Secret, not from this file.
+
+[tidal]
+country_code = "US"
+requests_per_second = 3.0   # slows itself down further whenever TIDAL answers 429
+
+[discography]
+types = ["ALBUM", "EP", "SINGLE"]
+# none       keep every copy of everything
+# editions   collapse copies of one release (clean/explicit pairs, re-deliveries)
+# recordings also keep each recording once (a single that is on the album is dropped)
+dedupe = "editions"
+prefer_explicit = true
+exclude_dj_mixes = true
+min_own_track_share = 0.5   # 4+ track releases where fewer tracks are the artist's are compilations
+
+# Radio shows, mix series, festival sets ("A State of Trance", "Group Therapy", ...).
+# The built-in name list includes the old tidal-sync blocklist; add your own here.
+exclude_collections = true
+extra_collection_names = []
+series_threshold = 15       # this many releases with one title (numbers aside) is a show, not a discography
+
+skip_artist_ids = []
+force_include_album_ids = []   # ids from `tidal-disco report` that were left out wrongly
+force_exclude_album_ids = []   # ids that got in and should not have
+
+[playlist]
+name = "Master Discography"    # parts are named "Master Discography 01", "02", ...
+access = "UNLISTED"
+part_target = 1850             # parts are filled to this ...
+part_cap = 2000                # ... and never grow past this
+prune_unmanaged = false        # true also removes tracks this tool did not add
+max_removal_fraction = 0.25
+
+[run]
+state_path = "/data/state.db"
+max_minutes = 300
+album_refresh_days = 60
