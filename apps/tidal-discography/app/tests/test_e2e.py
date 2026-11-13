@@ -198,21 +198,63 @@ def test_all_adds_refused_fails_without_blacklisting(fake, run):
     assert code == 0 and "added 78" in out
 
 
-def test_on_duplicates_is_dropped_if_tidal_refuses_it(fake, run):
+def test_no_duplicate_filter_is_asked_of_tidal(fake, run):
+    catalog(fake)
+    run("sync")
+    assert fake.add_bodies and not any("onDuplicates" in (b.get("meta") or {}) for b in fake.add_bodies)
+
+
+def test_a_lagging_count_is_not_a_problem(fake, run):
     t = catalog(fake)
-    fake.reject_on_duplicates = True
-    code, _ = run("sync")
-    assert code == 0 and fake.playlist_tracks(P1) == expected(t)
+    fake.count_lag = 30
+    code, out = run("sync")
+    assert code == 0 and "WARNING" not in out
+    assert fake.playlist_tracks(P1) == expected(t)
+    calls = len(fake.calls)
+    run("sync")
+    assert not [c for c in fake.calls[calls:] if "/playlists/" in c[1] and c[1].endswith("/items")]
+
+
+def test_tracks_tidal_accepts_but_never_adds(fake, run):
+    t = catalog(fake)
+    lost = {t["a_album"][3], t["c"][7]}
+    fake.silent_drop |= lost
+    code, out = run("sync")
+    assert "TIDAL accepted 2 track(s) without adding them" in out and "tries them once more" in out
+    code, out = run("sync")
+    assert "accepted 2 track(s) twice without adding them" in out and "skipped for 14 days" in out
+    code, out = run("sync")
+    assert code == 0 and "added 0, removed 0." in out and "WARNING" not in out
+    assert fake.playlist_tracks(P1) == [x for x in expected(t) if x not in lost]
+
+
+def test_a_track_that_lands_on_the_retry_is_kept(fake, run):
+    t = catalog(fake)
+    fake.silent_drop.add(t["b_ep"][0])
+    run("sync")
+    fake.silent_drop.clear()
+    code, out = run("sync")
+    assert code == 0 and "added 1" in out and "WARNING" not in out
+    assert fake.playlist_tracks(P1) == expected(t)
+
+
+def test_followed_artists_tidal_no_longer_has(fake, run):
+    t = catalog(fake)
+    fake.artist("dead", "")
+    fake.gone_artists.add("dead")
+    code, out = run("sync")
+    assert code == 0 and "1 followed artist(s) no longer exist on TIDAL (ids dead)" in out
+    assert "WARNING" not in out and fake.playlist_tracks(P1) == expected(t)
 
 
 def test_silent_drop_at_the_cap_is_noticed_and_repaired(fake, run):
     t = catalog(fake)
     fake.cap = 60
     code, out = run("sync")
-    assert "TIDAL reports 60 items, expected 78" in out
+    assert "TIDAL accepted 18 track(s) without adding them" in out
     fake.cap = 10000
     code, out = run("sync")
-    assert code == 0 and "added 18" in out
+    assert code == 0 and "added 18" in out and "WARNING" not in out
     assert fake.playlist_tracks(P1) == expected(t)
 
 

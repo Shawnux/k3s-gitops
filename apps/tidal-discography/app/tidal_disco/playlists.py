@@ -4,13 +4,16 @@ Rules that keep this safe:
 - only tracks this tool added are ever removed (unless prune_unmanaged is on);
 - a run that wants to remove a large share of a playlist for no known reason
   (not a move between parts, not an unfollow) skips those removals;
-- TIDAL silently drops additions past 10,000 items, so every write is followed
-  by a count check, and a mismatch forces a full re-read on the next run.
+- TIDAL can accept an addition and not make it (past 10,000 items, or a track
+  it won't add), so every write is followed by a count check. On a mismatch
+  the playlist is re-read to find the tracks that did not land; those are
+  tried once more on the next run, then skipped for 14 days.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import uuid
 
@@ -78,7 +81,6 @@ class PlaylistSync:
         self.state = state
         self.cfg = cfg
         self.dry_run = dry_run
-        self.send_on_duplicates = True
         self._mine = None
         self._accepted = 0
 
@@ -152,14 +154,12 @@ class PlaylistSync:
 
     # writes ----------------------------------------------------------------
     def _post_add(self, playlist_id, tracks, anchor):
-        meta = {}
-        if anchor:
-            meta["positionBefore"] = anchor
-        if self.send_on_duplicates:
-            meta["onDuplicates"] = "SKIP"
+        # No onDuplicates: the playlist is read before every change, so the tool
+        # never adds a track that is already there, and TIDAL's own duplicate
+        # check might treat the same recording on another release as a repeat.
         body = {"data": [{"id": t, "type": "tracks"} for t in tracks]}
-        if meta:
-            body["meta"] = meta
+        if anchor:
+            body["meta"] = {"positionBefore": anchor}
         self.client.request(
             "POST", f"/playlists/{playlist_id}/relationships/items", body=body,
             idempotency_key=str(uuid.uuid4()),
@@ -174,18 +174,6 @@ class PlaylistSync:
         except TidalError as exc:
             if exc.status not in (400, 403, 404, 409, 422):
                 raise
-            if self.send_on_duplicates and exc.status in (400, 422):
-                self.send_on_duplicates = False
-                try:
-                    self._post_add(playlist_id, tracks, anchor)
-                    log.warning("TIDAL refused onDuplicates=SKIP; carrying on without it")
-                    self._accepted += len(tracks)
-                    return list(tracks)
-                except TidalError as exc2:
-                    if exc2.status not in (400, 403, 404, 409, 422):
-                        raise
-                    self.send_on_duplicates = True
-                    exc = exc2
             if len(tracks) == 1:
                 rejected[tracks[0]] = f"{exc.status} {exc.body[:120]}"
                 if not self._accepted and len(rejected) >= REJECT_ABORT:
@@ -195,6 +183,42 @@ class PlaylistSync:
             mid = len(tracks) // 2
             done = self._add(playlist_id, tracks[:mid], anchor, rejected)
             return done + self._add(playlist_id, tracks[mid:], anchor, rejected)
+
+    def _check(self, part, pid, name, expected, attempted, out) -> bool:
+        """After writing: does TIDAL hold what it accepted? True when it does."""
+        lost_key = f"lost:{pid}"
+        after = self.meta(pid) or {}
+        if after.get("count") is not None and after["count"] != expected:
+            self.client.sleep(10)  # the count can lag behind the last write
+            after = self.meta(pid) or {}
+        out["total"] = after.get("count")
+        if after.get("count") is None or after["count"] == expected:
+            if self.state.get(lost_key):
+                self.state.set(lost_key, "")
+            return True
+
+        present = {it["track"] for it in self.read_items(pid)}
+        lost = [t for t in dict.fromkeys(attempted) if t not in present]
+        before = set(json.loads(self.state.get(lost_key) or "[]"))
+        again = [t for t in lost if t in before]
+        first = [t for t in lost if t not in before]
+        self.state.set(lost_key, json.dumps(first))
+        if again:
+            self.state.mark_unaddable({t: "accepted by TIDAL but never added" for t in again})
+            self.state.drop_managed(pid, again)
+            out["warnings"].append(
+                f"{name}: TIDAL accepted {len(again)} track(s) twice without adding them "
+                f"(e.g. {', '.join(again[:3])}); they are skipped for 14 days")
+        if first:
+            out["warnings"].append(
+                f"{name}: TIDAL accepted {len(first)} track(s) without adding them "
+                f"(e.g. {', '.join(first[:3])}); the next run tries them once more")
+        if not lost:
+            out["warnings"].append(
+                f"{name}: TIDAL reports {after['count']} items, expected {expected}; "
+                "the next run re-reads the playlist")
+        out["lost"] = lost
+        return False
 
     def sync_part(self, part: int, desired: list[str], label=("", ""), n_artists=0,
                   force=False, rebuild=False, explained=frozenset()) -> dict:
@@ -261,11 +285,13 @@ class PlaylistSync:
             out["removed"] += len(chunk)
 
         rejected: dict[str, str] = {}
+        attempted: list[str] = []
         self._accepted = 0
         for anchor, tracks in runs:
             for i in range(0, len(tracks), ADD_BATCH):
                 done = self._add(pid, tracks[i : i + ADD_BATCH], anchor, rejected)
                 self.state.add_managed(pid, done)
+                attempted += done
                 out["added"] += len(done)
         if rejected:
             self.state.mark_unaddable(rejected)
@@ -284,17 +310,11 @@ class PlaylistSync:
             except TidalError as exc:
                 out["warnings"].append(f"{name}: could not update the description ({exc.status})")
 
-        after = self.meta(pid) or {}
         expected = len(keep) + out["added"]
-        out["total"] = after.get("count")
-        if after.get("count") is not None and after["count"] != expected:
-            out["warnings"].append(
-                f"{name}: TIDAL reports {after['count']} items, expected {expected}; "
-                "the next run re-reads the playlist and repairs it")
-            self.state.set_part(part, pid, None, None)
-        elif partial:
+        if not self._check(part, pid, name, expected, attempted, out) or partial:
             self.state.set_part(part, pid, None, None)
         else:
+            after = self.meta(pid) or {}
             new_hash = desired_hash(desired, self.state.unaddable())
             self.state.set_part(part, pid, new_hash, f"{after.get('count')}|{after.get('modified')}")
         return out

@@ -31,7 +31,10 @@ class FakeTidal:
         self.fail_artists: set[str] = set()
         self.bad_tracks: set[str] = set()
         self.cap = 10000
-        self.reject_on_duplicates = False
+        self.silent_drop: set[str] = set()   # accepted with 201, never added
+        self.count_lag = 0                   # numberOfItems lags this far behind one write
+        self.gone_artists: set[str] = set()  # followed, but TIDAL answers 404
+        self.add_bodies: list[dict] = []
         self.reject_all_adds = False
         self.no_item_credits = False   # album responses carry no track artists
         self.no_track_lookup = False   # and /tracks?filter[id] is refused too
@@ -108,9 +111,10 @@ class FakeTidal:
 
     def _playlist_res(self, pid):
         p = self.playlists[pid]
+        lag, p["lag"] = p.get("lag", 0), 0
         return {"id": pid, "type": "playlists", "attributes": {
             "name": p["name"], "description": p["description"], "accessType": p["access"],
-            "numberOfItems": len(p["items"]), "lastModifiedAt": f"2026-11-11T00:00:{p['modified']:06d}Z",
+            "numberOfItems": len(p["items"]) - lag, "lastModifiedAt": f"2026-11-11T00:00:{p['modified']:06d}Z",
             "playlistType": "USER"}}
 
     def _touch(self, pid):
@@ -170,6 +174,8 @@ class FakeTidal:
         if seg[0] == "artists" and len(seg) == 4 and seg[2:] == ["relationships", "albums"]:
             if seg[1] in self.fail_artists:
                 return 500, {"errors": [{"code": "INTERNAL"}]}
+            if seg[1] in self.gone_artists:
+                return 404, {"errors": [{"code": "NOT_FOUND"}]}
             idents, links = page([{"id": a, "type": "albums"} for a in self.artist_albums.get(seg[1], [])],
                                  style="meta")
             doc = {"data": idents, "links": links}
@@ -258,8 +264,7 @@ class FakeTidal:
                 data, meta = payload["data"], payload.get("meta") or {}
                 if not 1 <= len(data) <= 50 or self.reject_all_adds:
                     return 400, {"errors": [{"code": "INVALID_REQUEST_BODY"}]}
-                if self.reject_on_duplicates and "onDuplicates" in meta:
-                    return 400, {"errors": [{"code": "INVALID_META"}]}
+                self.add_bodies.append(payload)
                 if any(d["id"] in self.bad_tracks or d["id"] not in self.tracks for d in data):
                     return 404, {"errors": [{"code": "NOT_FOUND", "detail": "track"}]}
                 assert all(d["type"] == "tracks" for d in data)
@@ -269,7 +274,9 @@ class FakeTidal:
                     if meta.get("onDuplicates") == "SKIP" and d["id"] in have:
                         continue
                     new.append({"track": d["id"], "item": str(uuid.uuid4())})
+                new = [n for n in new if n["track"] not in self.silent_drop]  # accepted, never added
                 new = new[: max(self.cap - len(items), 0)]  # past the cap: accepted, silently dropped
+                self.playlists[pid]["lag"] = min(self.count_lag, len(new))
                 before = meta.get("positionBefore")
                 if before:
                     index = next((n for n, i in enumerate(items) if i["item"] == before), None)
