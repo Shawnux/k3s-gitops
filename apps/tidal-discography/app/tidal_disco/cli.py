@@ -78,7 +78,7 @@ def cmd_sync(args, cfg) -> int:
 
     deadline = started + cfg.max_minutes * 60 if cfg.max_minutes else None
     collector = Collector(client, state, cfg, deadline)
-    albums, warnings, stale = {}, [], []
+    albums, warnings, stale, gone = {}, [], [], []
     done = 0
     try:
         for n, artist in enumerate(artists, 1):
@@ -87,7 +87,9 @@ def cmd_sync(args, cfg) -> int:
                 albums[artist.id] = collector.collect_artist(artist)
             except TidalError as exc:
                 fallback = collector.cached_artist(artist)
-                if fallback is None:
+                if exc.status == 404 and fallback is None:
+                    gone.append(artist.id)
+                elif fallback is None:
                     warnings.append(f"{artist.name}: TIDAL error {exc.status}, skipped this run")
                 else:
                     albums[artist.id] = fallback
@@ -154,7 +156,7 @@ def cmd_sync(args, cfg) -> int:
         "artists": len(artists), "releases": plan.n_releases, "tracks": plan.n_tracks,
         "repeat_recordings": plan.repeat_recordings, "dedupe": cfg.dedupe,
         "excluded_by_reason": dict(reasons), "excluded": plan.excluded, "unchecked": plan.unchecked,
-        "parts": results, "warnings": warnings, "stale_artists": stale,
+        "parts": results, "warnings": warnings, "stale_artists": stale, "gone_artists": gone,
         "api_calls": client.calls, "rate_limited": client.rate_limited,
     }
     if not dry:
@@ -173,6 +175,9 @@ def cmd_sync(args, cfg) -> int:
         f"Left out {len(plan.excluded)} releases: "
         + (", ".join(f"{n} {r}" for r, n in reasons.most_common(6)) or "none") + ".",
     ]
+    if gone:
+        lines.append(f"{len(gone)} followed artist(s) no longer exist on TIDAL (ids {', '.join(gone)}); "
+                     "list them in skip_artist_ids to stop checking them.")
     if plan.unchecked:
         lines.append(f"{len(plan.unchecked)} multi-track releases were kept without a credit check because "
                      "TIDAL returned no track credits for them (listed in `tidal-disco report`).")
