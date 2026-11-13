@@ -164,15 +164,36 @@ def _edition_rank(album: dict, prefer_explicit: bool):
 
 
 def dedupe_editions(albums: list[dict], prefer_explicit: bool):
-    """Collapse copies of one release (clean/explicit pairs, re-deliveries with a
-    new barcode). Editions with a different title, version or tracklist stay."""
-    groups: dict[tuple, list[dict]] = {}
-    for al in albums:
-        key = (
-            norm(full_title(al["title"], al.get("version"))), al["type"],
+    """Collapse copies of one release: clean/explicit pairs and re-deliveries
+    under a new id. Two releases are copies when they have the same name, type
+    and tracklist, or when they carry exactly the same recordings (ISRCs) in
+    the same order, however TIDAL wrote the name. Anything else stays."""
+    parent = list(range(len(albums)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first_with: dict[tuple, int] = {}
+    for i, al in enumerate(albums):
+        keys = [(
+            "name", norm(full_title(al["title"], al.get("version"))), al["type"],
             tuple(norm(full_title(t["title"], t.get("version"))) for t in al["tracks"]),
-        )
-        groups.setdefault(key, []).append(al)
+        )]
+        isrcs = tuple(t.get("isrc") or "" for t in al["tracks"])
+        if isrcs and all(isrcs):
+            keys.append(("isrc", isrcs))
+        for key in keys:
+            if key in first_with:
+                parent[find(i)] = find(first_with[key])
+            else:
+                first_with[key] = i
+
+    groups: dict[int, list[dict]] = {}
+    for i, al in enumerate(albums):
+        groups.setdefault(find(i), []).append(al)
     kept, dropped = [], []
     for group in groups.values():
         best = min(group, key=lambda a: _edition_rank(a, prefer_explicit))

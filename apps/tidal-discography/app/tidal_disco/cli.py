@@ -112,9 +112,6 @@ def cmd_sync(args, cfg) -> int:
             by_artist.setdefault(e["artist_id"], []).append(e)
         for block in plan.blocks:
             _print_artist(block, by_artist.get(block.artist_id, []))
-        if cfg.dedupe != "recordings" and plan.repeat_recordings:
-            print(f"\n{plan.repeat_recordings} tracks repeat a recording already listed; "
-                  'dedupe = "recordings" keeps each recording once.')
         print(f"\n(dedupe = {cfg.dedupe}; --only is a preview: no playlist was changed)")
         return 0
 
@@ -176,9 +173,6 @@ def cmd_sync(args, cfg) -> int:
         f"Left out {len(plan.excluded)} releases: "
         + (", ".join(f"{n} {r}" for r, n in reasons.most_common(6)) or "none") + ".",
     ]
-    if cfg.dedupe != "recordings" and plan.repeat_recordings:
-        lines.append(f"{plan.repeat_recordings} tracks repeat a recording already in the list "
-                     "(single and album copies); dedupe = \"recordings\" drops them.")
     if plan.unchecked:
         lines.append(f"{len(plan.unchecked)} multi-track releases were kept without a credit check because "
                      "TIDAL returned no track credits for them (listed in `tidal-disco report`).")
