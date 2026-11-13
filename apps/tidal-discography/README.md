@@ -37,7 +37,7 @@ or single. Left out, each with its reason recorded:
 | Series | 15 or more of the artist's multi-track releases share one title once numbers are removed |
 | DJ mix | "DJ Mix" / "Mixed by" in the title, or half the tracks are "(Mixed)" |
 | Karaoke, tribute and similar | title patterns |
-| Duplicate edition | a copy of a kept release (clean/explicit pairs) |
+| Duplicate edition | a copy of a kept release: same name and tracklist, or exactly the same recordings (ISRCs) in the same order |
 
 A track is the artist's when they are credited on it or named in its title, as
 a remixer is. The built-in name list contains the whole tidal-sync blocklist;
@@ -130,7 +130,12 @@ summary says how many releases were kept without a credit check.
     tidal-disco sync --force         skip the safety limits
     tidal-disco report [--artist N]  what the last run left out, and warnings
 
-Settings are in `manifests/config.toml`.
+Settings are in `manifests/config.toml`. `dedupe = "editions"` (the setting
+here) keeps every official release whole, so an original also appears on each
+of its remix singles and remix EPs. Only copies of one release are merged:
+clean/explicit pairs, re-deliveries under a new id, and releases with exactly
+the same recordings in the same order however TIDAL wrote the name.
+`recordings` would keep each recording once instead.
 
 ## What has and has not been verified
 

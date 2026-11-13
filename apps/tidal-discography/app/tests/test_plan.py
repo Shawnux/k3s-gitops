@@ -96,6 +96,49 @@ def test_recordings_mode_keeps_the_album_copy():
     assert recordings.blocks[0].track_ids == ["f1", "f2"]
 
 
+def test_recordings_mode_keeps_the_original_on_its_first_release():
+    hit = track("s1", "Acrobatic", isrc="AC")
+    single = album("s", title="Acrobatic", kind="SINGLE", date="2021-04-30", tracks=[hit])
+    remix1 = album("r1", title="Acrobatic (Biscits Remix)", kind="SINGLE", date="2021-09-08",
+                   tracks=[track("r1a", "Acrobatic", isrc="AC"), track("r1b", "Acrobatic", isrc="B1", version="Biscits Remix")])
+    pack_ = album("ep", title="Acrobatic (Remixes)", kind="EP", date="2021-10-01",
+                  tracks=[track("e1", "Acrobatic", isrc="AC"), track("e2", "Acrobatic", isrc="B1", version="Biscits Remix"),
+                          track("e3", "Acrobatic", isrc="W1", version="Worra Remix")])
+    plan = build_plan([A], {"a1": [pack_, remix1, single]}, Config(dedupe="recordings"))
+    assert plan.blocks[0].track_ids == ["s1", "r1b", "e3"]
+    assert [(r["album_id"], r["tracks"], r["of"]) for r in plan.blocks[0].releases] == [
+        ("s", 1, 1), ("r1", 1, 2), ("ep", 1, 3)]
+
+
+def test_version_already_in_the_title_is_one_release():
+    a = album("a", title="Temptation (Lee Foss Remix)", version="Lee Foss Remix", kind="SINGLE",
+              tracks=[track("a1", "Temptation", version="Lee Foss Remix")])
+    b = album("b", title="Temptation (Lee Foss Remix)", kind="SINGLE",
+              tracks=[track("b1", "Temptation (Lee Foss Remix)")])
+    plan = build_plan([A], {"a1": [a, b]}, Config())
+    assert len(plan.blocks[0].releases) == 1
+    assert plan.blocks[0].releases[0]["title"] == "Temptation (Lee Foss Remix)"
+    assert plan.excluded[0]["reason"].startswith("duplicate edition of")
+
+
+def test_same_recordings_under_another_name_is_a_copy():
+    a = album("a", title="Temptation (Lee Foss Remix)", version="Lee Foss Remix (Extended)", kind="SINGLE",
+              tracks=[track("a1", "Temptation", isrc="T1", version="Lee Foss Remix")])
+    b = album("b", title="Temptation (Lee Foss Remix)", kind="SINGLE",
+              tracks=[track("b1", "Temptation - Lee Foss Remix (Radio)", isrc="T1")])
+    extended = album("c", title="Temptation (Lee Foss Remix)", kind="SINGLE",
+                     tracks=[track("c1", "Temptation", isrc="T2", version="Lee Foss Extended Remix")])
+    remix_single = album("d", title="Acrobatic (Biscits Remix)", kind="SINGLE",
+                         tracks=[track("d1", "Acrobatic", isrc="A0"), track("d2", "Acrobatic", isrc="A1")])
+    original = album("e", title="Acrobatic", kind="SINGLE", tracks=[track("e1", "Acrobatic", isrc="A0")])
+    plan = build_plan([A], {"a1": [a, b, extended, remix_single, original]}, Config())
+    kept = sorted(r["album_id"] for r in plan.blocks[0].releases)
+    assert len(kept) == 4 and "c" in kept and "d" in kept and "e" in kept
+    assert [e["reason"] for e in plan.excluded] == [f"duplicate edition of {({'a', 'b'} & set(kept)).pop()}"]
+    # every official release stays whole: the original is on its remix single too
+    assert plan.blocks[0].track_ids.count("d1") == 1 and "e1" in plan.blocks[0].track_ids
+
+
 def test_shared_release_is_listed_once():
     shared = album("s", artists=("a1", "b1"), tracks=[track("s1", artists=("a1", "b1"))])
     plan = build_plan([A, B], {"a1": [shared], "b1": [shared]}, Config())
@@ -147,8 +190,9 @@ def test_the_artists_own_work_is_not_mistaken_for_a_collection():
 
 def test_a_title_repeated_many_times_is_a_series():
     assert base_pattern("Night Drive Radio 042 [Part 2]") == "night drive radio"
-    blind = [dict(t, artist_ids=None) for t in others(8)]
-    shows = [album(f"s{i}", title=f"Night Drive Radio {i:03d}", tracks=blind) for i in range(15)]
+    shows = [album(f"s{i}", title=f"Night Drive Radio {i:03d}",
+                   tracks=[dict(track(f"s{i}-{n}", artists=("x",)), artist_ids=None) for n in range(8)])
+             for i in range(15)]
     real = album("r", title="Real Album", tracks=[track("r1")])
     plan = build_plan([A], {"a1": shows + [real]}, Config())
     assert [r["album_id"] for r in plan.blocks[0].releases] == ["r"]

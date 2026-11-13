@@ -38,8 +38,15 @@ def _notify(cfg, text: str) -> None:
 def _print_artist(block, excluded) -> None:
     print(f"\n{block.artist_name}  ({len(block.releases)} releases, {len(block.track_ids)} tracks)")
     for r in block.releases:
-        title = r["title"] + (f" ({r['version']})" if r["version"] else "")
-        print(f"  + {r['date'] or '????-??-??'}  {r['type']:<6} {title}  [{r['tracks']} tracks]  id {r['album_id']}")
+        title = r["title"] + (f" ({r['version']})" if r.get("version") else "")
+        of = r.get("of", r["tracks"])
+        if r["tracks"] == 0:
+            count = "all tracks already listed"
+        elif r["tracks"] < of:
+            count = f"{r['tracks']} of {of} tracks, the rest already listed"
+        else:
+            count = f"{r['tracks']} tracks"
+        print(f"  + {r['date'] or '????-??-??'}  {r['type']:<6} {title}  [{count}]  id {r['album_id']}")
     for e in excluded:
         title = e["title"] + (f" ({e['version']})" if e["version"] else "")
         print(f"  - {e['date'] or '????-??-??'}  {e['type']:<6} {title}  id {e['album_id']}\n      left out: {e['reason']}")
@@ -105,7 +112,7 @@ def cmd_sync(args, cfg) -> int:
             by_artist.setdefault(e["artist_id"], []).append(e)
         for block in plan.blocks:
             _print_artist(block, by_artist.get(block.artist_id, []))
-        print("\n(--only is a preview: no playlist was changed)")
+        print(f"\n(dedupe = {cfg.dedupe}; --only is a preview: no playlist was changed)")
         return 0
 
     parts, labels, mapping = pack(plan.blocks, state.block_parts(), cfg.part_target, cfg.part_cap)
@@ -166,9 +173,6 @@ def cmd_sync(args, cfg) -> int:
         f"Left out {len(plan.excluded)} releases: "
         + (", ".join(f"{n} {r}" for r, n in reasons.most_common(6)) or "none") + ".",
     ]
-    if cfg.dedupe != "recordings" and plan.repeat_recordings:
-        lines.append(f"{plan.repeat_recordings} tracks repeat a recording already in the list "
-                     "(single and album copies); dedupe = \"recordings\" drops them.")
     if plan.unchecked:
         lines.append(f"{len(plan.unchecked)} multi-track releases were kept without a credit check because "
                      "TIDAL returned no track credits for them (listed in `tidal-disco report`).")

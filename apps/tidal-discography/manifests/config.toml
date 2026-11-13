@@ -8,8 +8,11 @@ requests_per_second = 3.0   # slows itself down further whenever TIDAL answers 4
 [discography]
 types = ["ALBUM", "EP", "SINGLE"]
 # none       keep every copy of everything
-# editions   collapse copies of one release (clean/explicit pairs, re-deliveries)
-# recordings also keep each recording once (a single that is on the album is dropped)
+# editions   every official release whole; only copies of the same release are
+#            merged (clean/explicit pairs, re-deliveries, the same recordings
+#            under a slightly different name)
+# recordings also keep each recording once (an original isn't repeated on its
+#            remix singles; a track on an album keeps its album copy)
 dedupe = "editions"
 prefer_explicit = true
 exclude_dj_mixes = true
