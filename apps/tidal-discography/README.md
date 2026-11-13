@@ -130,7 +130,11 @@ summary says how many releases were kept without a credit check.
     tidal-disco sync --force         skip the safety limits
     tidal-disco report [--artist N]  what the last run left out, and warnings
 
-Settings are in `manifests/config.toml`.
+Settings are in `manifests/config.toml`. `dedupe = "recordings"` (the
+setting here) keeps each recording once: a track on an album keeps its album
+copy, otherwise the first release that carried it keeps it, so an original is
+not repeated on every remix single and remix EP. `editions` keeps every
+distinct release whole and only collapses identical copies.
 
 ## What has and has not been verified
 

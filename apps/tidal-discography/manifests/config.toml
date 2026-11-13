@@ -9,8 +9,10 @@ requests_per_second = 3.0   # slows itself down further whenever TIDAL answers 4
 types = ["ALBUM", "EP", "SINGLE"]
 # none       keep every copy of everything
 # editions   collapse copies of one release (clean/explicit pairs, re-deliveries)
-# recordings also keep each recording once (a single that is on the album is dropped)
-dedupe = "editions"
+# recordings also keep each recording once: a track on an album keeps its album
+#            copy; otherwise the first release that carried it keeps it, so an
+#            original isn't repeated on every remix single and remix EP
+dedupe = "recordings"
 prefer_explicit = true
 exclude_dj_mixes = true
 min_own_track_share = 0.5   # 4+ track releases where fewer tracks are the artist's are compilations

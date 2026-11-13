@@ -96,6 +96,31 @@ def test_recordings_mode_keeps_the_album_copy():
     assert recordings.blocks[0].track_ids == ["f1", "f2"]
 
 
+def test_recordings_mode_keeps_the_original_on_its_first_release():
+    hit = track("s1", "Acrobatic", isrc="AC")
+    single = album("s", title="Acrobatic", kind="SINGLE", date="2021-04-30", tracks=[hit])
+    remix1 = album("r1", title="Acrobatic (Biscits Remix)", kind="SINGLE", date="2021-09-08",
+                   tracks=[track("r1a", "Acrobatic", isrc="AC"), track("r1b", "Acrobatic", isrc="B1", version="Biscits Remix")])
+    pack_ = album("ep", title="Acrobatic (Remixes)", kind="EP", date="2021-10-01",
+                  tracks=[track("e1", "Acrobatic", isrc="AC"), track("e2", "Acrobatic", isrc="B1", version="Biscits Remix"),
+                          track("e3", "Acrobatic", isrc="W1", version="Worra Remix")])
+    plan = build_plan([A], {"a1": [pack_, remix1, single]}, Config(dedupe="recordings"))
+    assert plan.blocks[0].track_ids == ["s1", "r1b", "e3"]
+    assert [(r["album_id"], r["tracks"], r["of"]) for r in plan.blocks[0].releases] == [
+        ("s", 1, 1), ("r1", 1, 2), ("ep", 1, 3)]
+
+
+def test_version_already_in_the_title_is_one_release():
+    a = album("a", title="Temptation (Lee Foss Remix)", version="Lee Foss Remix", kind="SINGLE",
+              tracks=[track("a1", "Temptation", version="Lee Foss Remix")])
+    b = album("b", title="Temptation (Lee Foss Remix)", kind="SINGLE",
+              tracks=[track("b1", "Temptation (Lee Foss Remix)")])
+    plan = build_plan([A], {"a1": [a, b]}, Config())
+    assert len(plan.blocks[0].releases) == 1
+    assert plan.blocks[0].releases[0]["title"] == "Temptation (Lee Foss Remix)"
+    assert plan.excluded[0]["reason"].startswith("duplicate edition of")
+
+
 def test_shared_release_is_listed_once():
     shared = album("s", artists=("a1", "b1"), tracks=[track("s1", artists=("a1", "b1"))])
     plan = build_plan([A, B], {"a1": [shared], "b1": [shared]}, Config())

@@ -41,6 +41,15 @@ def base_pattern(title: str) -> str:
     return " ".join(t.split())
 
 
+def full_title(title: str, version: str | None) -> str:
+    """Title with its version added, unless the title already contains it
+    (TIDAL often has "Song (X Remix)" with version "X Remix")."""
+    title, version = title or "", (version or "").strip()
+    if not version or norm(version) in norm(title):
+        return title
+    return f"{title} ({version})"
+
+
 def sort_name(name: str) -> str:
     n = unicodedata.normalize("NFKD", name or "").casefold().strip()
     n = "".join(c for c in n if not unicodedata.combining(c))
@@ -114,13 +123,13 @@ def classify(album: dict, artist, cfg, title_res, names=(), series=frozenset()) 
         return "appears on (not a main artist)"
     if any((n or "").casefold().strip() in VARIOUS for n in album.get("artist_names") or []):
         return "various-artists compilation"
-    full_title = f"{album['title']} {album.get('version') or ''}"
+    whole = full_title(album["title"], album.get("version"))
     for rx in title_res:
-        if rx.search(full_title):
+        if rx.search(whole):
             return f"title matches /{rx.pattern}/"
     big = len(tracks) >= cfg.compilation_min_tracks
     if cfg.exclude_dj_mixes:
-        if DJ_MIX_TITLE.search(full_title):
+        if DJ_MIX_TITLE.search(whole):
             return "DJ mix"
         mixed = sum(
             1 for t in tracks
@@ -138,7 +147,7 @@ def classify(album: dict, artist, cfg, title_res, names=(), series=frozenset()) 
         if base_pattern(album["title"]) in series:
             return "series (many releases share this title)"
         if share is None or share < cfg.collection_own_share:
-            label = collection_label(full_title, names)
+            label = collection_label(whole, names)
             if label:
                 return f"collection ({label})"
     return None
@@ -160,8 +169,8 @@ def dedupe_editions(albums: list[dict], prefer_explicit: bool):
     groups: dict[tuple, list[dict]] = {}
     for al in albums:
         key = (
-            norm(al["title"]), norm(al.get("version") or ""), al["type"],
-            tuple(norm(f"{t['title']} {t.get('version') or ''}") for t in al["tracks"]),
+            norm(full_title(al["title"], al.get("version"))), al["type"],
+            tuple(norm(full_title(t["title"], t.get("version"))) for t in al["tracks"]),
         )
         groups.setdefault(key, []).append(al)
     kept, dropped = [], []
@@ -212,12 +221,14 @@ def build_plan(artists, albums_by_artist: dict, cfg) -> Plan:
                 plan.excluded.append(_excluded(artist, album, reason))
         kept.sort(key=lambda pair: (pair[1], TYPE_RANK.get(pair[0]["type"], 9), norm(pair[0]["title"]), pair[0]["id"]))
 
+        # recordings: a track on an album keeps its album copy, so albums play
+        # complete; otherwise the first release that carried it keeps it
         winners: dict[str, tuple] = {}
         if cfg.dedupe == "recordings":
             for idx, (album, date) in enumerate(kept):
                 for t in album["tracks"]:
                     if t.get("isrc"):
-                        score = (TYPE_RANK.get(album["type"], 9), date, idx)
+                        score = (0 if album["type"] == "ALBUM" else 1, date, idx)
                         if t["isrc"] not in winners or score < winners[t["isrc"]][0]:
                             winners[t["isrc"]] = (score, t["id"])
 
@@ -241,8 +252,9 @@ def build_plan(artists, albums_by_artist: dict, cfg) -> Plan:
                 block.track_ids.append(t["id"])
                 added += 1
             block.releases.append(
-                {"album_id": album["id"], "title": album["title"], "version": album.get("version") or "",
-                 "type": album["type"], "date": date if date != "9999-99-99" else "", "tracks": added}
+                {"album_id": album["id"], "title": full_title(album["title"], album.get("version")),
+                 "type": album["type"], "date": date if date != "9999-99-99" else "", "tracks": added,
+                 "of": len(album["tracks"])}
             )
         plan.blocks.append(block)
     return plan
@@ -251,7 +263,7 @@ def build_plan(artists, albums_by_artist: dict, cfg) -> Plan:
 def _excluded(artist, album: dict, reason: str) -> dict:
     return {
         "artist": artist.name, "artist_id": artist.id, "album_id": album["id"],
-        "title": album["title"], "version": album.get("version") or "",
+        "title": full_title(album["title"], album.get("version")), "version": "",
         "type": album["type"], "date": album.get("date") or "", "reason": reason,
     }
 
