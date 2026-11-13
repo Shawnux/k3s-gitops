@@ -1,0 +1,19 @@
+# kubectl apply -f this once (or add it wherever your ArgoCD Applications live).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tidal-discography
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Shawnux/k3s-gitops.git
+    targetRevision: HEAD
+    path: apps/tidal-discography/manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tidal-discography
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
